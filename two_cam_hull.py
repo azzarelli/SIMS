@@ -8,11 +8,6 @@ import torch
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.utils import plotly_utils as vis
 
-cx = 20.0
-cy = 10.0
-fx = 20.0
-fy = 20.0
-
 
 
 def focal2fov(focal, pixels): # From 4DGS
@@ -53,25 +48,16 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     P[2, 3] = -(zfar * znear) / (zfar - znear)
     return P
 
-DEBUG = True
-
-fp = "./data/two_cam/"
-ext = '.jpg'
-
-mask_fp = fp+'mask/'
-
-mask_colors = ['B']
-
-# Projection Parameters
-trans = 0.
-scale = 0.
-
-zfar = 100.0
-znear = 0.01
 
 
-# Ensure path exists
-if os.path.exists(fp+'transforms_train.json'):
+
+def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
+    # Ensure path exists
+    assert os.path.exists(fp+'transforms_train.json'), 'Could not find the transorms_train.json file'
+    
+    mask_fp = fp+'mask/'
+
+
     with open(fp+'transforms_train.json', 'r') as file:
         data = json.load(file)
 
@@ -98,7 +84,7 @@ if os.path.exists(fp+'transforms_train.json'):
     from PIL import Image
     import matplotlib.pyplot as plt
     
-    from numpy import array, argwhere
+    from numpy import argwhere
     import matplotlib.patches as patches
 
 
@@ -106,8 +92,14 @@ if os.path.exists(fp+'transforms_train.json'):
         transforms.ToTensor()
     ])
 
-    for frame in frame_data:
+    hulls = []
 
+    fig = plt.figure()
+
+    ax = fig.add_subplot(111, projection='3d')
+
+
+    for frame in frame_data:
         # Process frame name:
         fname = frame['file_path'].split('/')[-1]+ext
 
@@ -143,33 +135,131 @@ if os.path.exists(fp+'transforms_train.json'):
 
                 plt.show()
 
-            # W2C = np.array(frame['transform_matrix'])
-            # R = W2C[:3,:3].transpose()
-            # T = W2C[:3, 3]
+            W2C = np.array(frame['transform_matrix'])
 
-            # # Get the camera to world
-            # C2W = torch.from_numpy(np.linalg.inv(W2C))[:3, :].cpu()
-
-
-            # world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1)
-            # # .cuda()
-            # projection_matrix = getProjectionMatrix(znear=znear, zfar=zfar, fovX=selected_data['fovx'], fovY=selected_data['fovy']).transpose(0,1)
-            # # .cuda()
-
-            # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
-            # camera_center = world_view_transform.inverse()[3, :3]
-
-            # selected_data[fname] = {
-            #     'R':R,
-            #     'T':T
-            # }
-
-            # camera = Cameras(fx=data['fl_x'], fy=data['fl_y'], cx=float(data['w']/2), cy=float(data['h']/2), camera_to_worlds=C2W, camera_type=CameraType.PERSPECTIVE)
-            # ray_bundle = camera.generate_rays(camera_indices=0)
-
-
-            # exit()
+            # Get the camera to world
+            matrix = np.linalg.inv(W2C) #torch.from_numpy(W2C[:3, :]).cpu() #
             
-            # fig = vis.vis_camera_rays(camera)
-            # fig.show()
+            # Go from our (OpenCV) to Nerfstudio (OpenGL)
+            # Essential y and z axis are flippd bu x-axis remain the same
+            T_opencv_to_opengl = np.array([
+                    [1,  0,  0, 0],
+                    [0, -1,  0, 0],
+                    [0,  0,  -1, 0],
+                    [0,  0,  0, 1]
+                ])
 
+            # Apply the transformation
+            C2W = torch.from_numpy(T_opencv_to_opengl @ matrix @ T_opencv_to_opengl.T)[:3, :]
+    
+            # Get the nerfstudio Ray-Bundles for the selected cameras (to get the origins and direction in 3-D)
+            camera = Cameras(fx=data['fl_x'], fy=data['fl_y'], cx=float(data['w']/2), cy=float(data['h']/2), camera_to_worlds=C2W, camera_type=CameraType.PERSPECTIVE)
+            ray_bundle = camera.generate_rays(camera_indices=0)
+
+            XY = np.array([[xstart, ystart],
+                [xstart, ystop],
+                [xstop, ystart],
+                [xstop, ystop]
+                ])
+
+            # Get the rays at the corners of the 2-D AABB Box
+            ray = ray_bundle[XY[:, 1], XY[:, 0]]
+            
+            if DEBUG:
+                for r in ray:
+                    ax.quiver(r.origins[0], r.origins[1], r.origins[2], r.directions[0], r.directions[1], r.directions[2], color='r', label='Quiver 1')
+
+            # Get the vertices corresponding to our trapezoid
+            top_vertices = ray.origins + znear * ray.directions
+            base_vertcies = ray.origins + zfar * ray.directions
+
+            vertices = torch.cat([top_vertices, base_vertcies], dim=0)
+
+            hulls.append(vertices)
+
+    if DEBUG:
+        plt.show()
+
+
+    return hulls
+
+def getConvexHull(hulls):
+    """Using some ChatGPT never hurt:
+    """
+    from scipy.spatial import ConvexHull
+    
+    points = torch.cat(hulls, dim=0).cpu().tolist()
+
+    assert (len(points)) == 16, 'Inccorect number of vertices (16 are needed, 8 for each projection)'
+    hull = ConvexHull(points)
+
+    hull_vertices = hull.points[hull.vertices]
+
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # The simplices are faces
+    for simplex in hull.simplices:
+        poly = [hull.points[simplex]]
+        ax.add_collection3d(Poly3DCollection(poly, alpha=.25, linewidths=1, edgecolors='r'))
+    
+
+    for id, hull in enumerate(hulls):
+        top = hull[:4]
+        base = hull[4:]
+        hull = torch.cat([base, top], dim=0)
+        print(hull)
+
+        c = 'g-' if id ==0 else 'b-'
+        for i in range(4):
+            ax.plot([hull[i][0], hull[(i+1)%4][0]], 
+                    [hull[i][1], hull[(i+1)%4][1]], 
+                    [hull[i][2], hull[(i+1)%4][2]], c)
+            ax.plot([hull[i+4][0], hull[(i+1)%4 + 4][0]], 
+                    [hull[i+4][1], hull[(i+1)%4 + 4][1]], 
+                    [hull[i+4][2], hull[(i+1)%4 + 4][2]], c)
+            ax.plot([hull[i][0], hull[i+4][0]], 
+                    [hull[i][1], hull[i+4][1]], 
+                    [hull[i][2], hull[i+4][2]], c)
+
+
+    ax.scatter(*zip(*points))
+    plt.show()
+
+from argparse import ArgumentParser
+import sys
+
+DEBUG = False
+
+
+if __name__ == "__main__":
+    # Set up command line argument parser
+    # torch.set_default_tensor_type('torch.FloatTensor')
+    torch.cuda.empty_cache()
+    parser = ArgumentParser(description="Training script parameters")
+
+    parser.add_argument('--debug', action='store_true', default=False)
+    parser.add_argument('--fp', type=str, default="./data/two_cam/")
+    parser.add_argument('--ext', type=str, default=".jpg")
+
+
+    args = parser.parse_args(sys.argv[1:])
+
+
+    mask_colors = ['B'] # TODO define a way of selecting a specific colour channel for an image with multiple detected humans
+
+    # Projection Parameters
+    # TODO : Maybe makle these arguments?
+
+    zfar = 100.0
+    znear = 0.01
+    
+    DEBUG = args.debug
+    hulls = getTrapezoidVertices(args.fp, args.ext)
+
+    
+
+    getConvexHull(hulls)
