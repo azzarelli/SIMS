@@ -51,7 +51,7 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
 
 
 
-def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
+def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
     # Ensure path exists
     assert os.path.exists(fp+'transforms_train.json'), 'Could not find the transorms_train.json file'
     
@@ -86,6 +86,7 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
     
     from numpy import argwhere
     import matplotlib.patches as patches
+    
 
 
     transform = transforms.Compose([
@@ -94,9 +95,10 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
 
     hulls = []
 
-    fig = plt.figure()
+    if DEBUG:
+        fig = plt.figure()
 
-    ax = fig.add_subplot(111, projection='3d')
+        ax = fig.add_subplot(111, projection='3d')
 
 
     for frame in frame_data:
@@ -156,8 +158,9 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
             camera = Cameras(fx=data['fl_x'], fy=data['fl_y'], cx=float(data['w']/2), cy=float(data['h']/2), camera_to_worlds=C2W, camera_type=CameraType.PERSPECTIVE)
             ray_bundle = camera.generate_rays(camera_indices=0)
 
-            XY = np.array([[xstart, ystart],
+            XY = np.array([
                 [xstart, ystop],
+                [xstart, ystart],
                 [xstop, ystart],
                 [xstop, ystop]
                 ])
@@ -173,9 +176,9 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
             top_vertices = ray.origins + znear * ray.directions
             base_vertcies = ray.origins + zfar * ray.directions
 
-            vertices = torch.cat([top_vertices, base_vertcies], dim=0)
-
-            hulls.append(vertices)
+          
+        
+            hulls.append((top_vertices, base_vertcies, ray.directions))
 
     if DEBUG:
         plt.show()
@@ -183,52 +186,117 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=10.):
 
     return hulls
 
-def getConvexHull(hulls):
-    """Using some ChatGPT never hurt:
-    """
-    from scipy.spatial import ConvexHull
+from sympy import Plane, Line3D, Point3D
+
+def ray_plane_intersection(ray_origin, ray_direction, plane_normal, point_on_plane):
+    # Check if the ray is parallel to the plane
+    denom = np.dot(plane_normal, ray_direction)
+    if np.abs(denom) < 1e-6:
+        return None  # No intersection, the ray is parallel to the plane
     
-    points = torch.cat(hulls, dim=0).cpu().tolist()
+    # Calculate the intersection point
+    t = np.dot(plane_normal, point_on_plane - ray_origin) / denom
+    if t <= 0.001:
+        return None  # The intersection is behind the ray origin
+    
+    intersection_point = ray_origin + t * ray_direction
+    return intersection_point
 
-    assert (len(points)) == 16, 'Inccorect number of vertices (16 are needed, 8 for each projection)'
-    hull = ConvexHull(points)
+def getHullIntersection(camdata):
+    """
 
-    hull_vertices = hull.points[hull.vertices]
+    Notes:
+        We need three points (xyz) to define a plane. And we construct 4 planes: the Top, left, bottom, right planes
+        The input is a list with a dictionary containing each top and base vertices. The top vertices are the near-frustum camera vertices,
+        in the order of: top-left, bottom-left, bottom-right, top-right  
+    """
+      # Construct a line for each point
+    # The order is top-left anti-clockwise to top-right
+    
+    
 
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+    def ray_plane_intersection(ray_origin, ray_direction, plane_normal, point_on_plane):
+        """Frome chatgpt"""
+        # Check if the ray is parallel to the plane
+        denom = np.dot(plane_normal, ray_direction)
+        if np.abs(denom) < 1e-11:
+            return None  # No intersection, the ray is parallel to the plane
+        
+        # Calculate the intersection point
+        t = np.dot(plane_normal, point_on_plane - ray_origin) / denom
+        if t < 0:
+            return None  # The intersection is behind the ray origin
+        
+        intersection_point = ray_origin + t * ray_direction
+        return intersection_point
+    
+
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     
-    # The simplices are faces
-    for simplex in hull.simplices:
-        poly = [hull.points[simplex]]
-        ax.add_collection3d(Poly3DCollection(poly, alpha=.25, linewidths=1, edgecolors='r'))
+    planes = []
+    rays = []
+    cols = ['b', 'g']
+    for j, data in enumerate(camdata):
+
+        for i, (top, bottom, direct) in enumerate(zip(*data)):
+            ax.plot([top[0], bottom[0]], [top[1], bottom[1]], [top[2], bottom[2]], c=cols[j])
+
+            if j == 0:
+                # line = Line3D(top.tolist(), direction_ratio=direct.tolist())
+
+                rays.append([top.numpy(), direct.numpy()]) 
+
+            else:
+                v0, v1, v2 = top, data[1][(i+1)%4], bottom
+                # Compute the normal of the plane defined by the triangle (v0, v1, v2)
+                edge1 = v1 - v0
+                edge2 = v2 - v0
+                normal = np.cross(edge1, edge2)
+                normal = normal / np.linalg.norm(normal)
+
+                planes.append([normal, v0])
+
+
+                poly3d = [[top.tolist(),  data[1][(i+1)%4].tolist(), bottom.tolist()]]
+                poly = Poly3DCollection(poly3d, alpha=0.5, facecolors='cyan', linewidths=1, edgecolors='r')
+
+                # # Add the polygon to the plot
+                ax.add_collection3d(poly)
+
+                # plane = Plane(top.tolist(),  data[1][(i+1)%4].tolist(), bottom.tolist())
+                # planes.append(plane)
+
+
+    intersections = []
+    for ray in rays:
+        for plane in planes:
+
+            inter = ray_plane_intersection(ray[0], ray[1], plane[0], plane[1])
+
+            if inter is not None:
+                intersections.append(inter)
+    #         intr = plane.intersection(ray)
+    #         inside = True #is_point_on_line_segment(ray, intr[0])
+            
+    #         if inside:
+    #             intersection =np.array(intr[0],dtype=float)
+
+
+    #             intersections.append(intersection)
+    # print(len(intersections))
+    # print(intersections)
+
     
 
-    for id, hull in enumerate(hulls):
-        top = hull[:4]
-        base = hull[4:]
-        hull = torch.cat([base, top], dim=0)
-        print(hull)
 
-        c = 'g-' if id ==0 else 'b-'
-        for i in range(4):
-            ax.plot([hull[i][0], hull[(i+1)%4][0]], 
-                    [hull[i][1], hull[(i+1)%4][1]], 
-                    [hull[i][2], hull[(i+1)%4][2]], c)
-            ax.plot([hull[i+4][0], hull[(i+1)%4 + 4][0]], 
-                    [hull[i+4][1], hull[(i+1)%4 + 4][1]], 
-                    [hull[i+4][2], hull[(i+1)%4 + 4][2]], c)
-            ax.plot([hull[i][0], hull[i+4][0]], 
-                    [hull[i][1], hull[i+4][1]], 
-                    [hull[i][2], hull[i+4][2]], c)
-
-
-    ax.scatter(*zip(*points))
+    ax.scatter(*zip(*intersections), 'r')
     plt.show()
 
+    # Then lets 
 from argparse import ArgumentParser
 import sys
 
@@ -260,6 +328,4 @@ if __name__ == "__main__":
     DEBUG = args.debug
     hulls = getTrapezoidVertices(args.fp, args.ext)
 
-    
-
-    getConvexHull(hulls)
+    getHullIntersection(hulls)
