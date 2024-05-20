@@ -8,48 +8,12 @@ import torch
 from nerfstudio.cameras.cameras import Cameras, CameraType
 from nerfstudio.utils import plotly_utils as vis
 
+import matplotlib
+matplotlib.use('TkAgg')
 
 
 def focal2fov(focal, pixels): # From 4DGS
     return 2*math.atan(pixels/(2*focal))
-
-def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
-    Rt = np.zeros((4, 4))
-    Rt[:3, :3] = R.transpose()
-    Rt[:3, 3] = t
-    Rt[3, 3] = 1.0
-
-    C2W = np.linalg.inv(Rt)
-    cam_center = C2W[:3, 3]
-    cam_center = (cam_center + translate) * scale
-    C2W[:3, 3] = cam_center
-    Rt = np.linalg.inv(C2W)
-    return np.float32(Rt)
-
-def getProjectionMatrix(znear, zfar, fovX, fovY):
-    tanHalfFovY = math.tan((fovY / 2))
-    tanHalfFovX = math.tan((fovX / 2))
-
-    top = tanHalfFovY * znear
-    bottom = -top
-    right = tanHalfFovX * znear
-    left = -right
-
-    P = torch.zeros(4, 4)
-
-    z_sign = 1.0
-
-    P[0, 0] = 2.0 * znear / (right - left)
-    P[1, 1] = 2.0 * znear / (top - bottom)
-    P[0, 2] = (right + left) / (right - left)
-    P[1, 2] = (top + bottom) / (top - bottom)
-    P[3, 2] = z_sign
-    P[2, 2] = z_sign * zfar / (zfar - znear)
-    P[2, 3] = -(zfar * znear) / (zfar - znear)
-    return P
-
-
-
 
 def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
     # Ensure path exists
@@ -65,16 +29,17 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
 
     mask_fps = [mask_fp+dir for dir in image_names]
 
-    image_fps = [fp+dir for dir in image_names]
+    # image_fps = [fp+dir for dir in image_names]
 
     frame_data = data['frames']
-    selected_data = {
-        'h':data['h'],
-        'w':data['w'],
 
-        'fovx': focal2fov(data['fl_x'], data['w']),
-        'fovy': focal2fov(data['fl_y'], data['h'])
-    }
+    # selected_data = {
+    #     'h':data['h'],
+    #     'w':data['w'],
+    #
+    #     'fovx': focal2fov(data['fl_x'], data['w']),
+    #     'fovy': focal2fov(data['fl_y'], data['h'])
+    # }
     
     """
     The idea is to get the mask bounding box and projecting the two hulls comprised from each mask bounding box
@@ -86,7 +51,7 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
     
     from numpy import argwhere
     import matplotlib.patches as patches
-    
+
 
 
     transform = transforms.Compose([
@@ -212,25 +177,35 @@ def getHullIntersection(camdata):
     """
       # Construct a line for each point
     # The order is top-left anti-clockwise to top-right
-    
-    
 
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     def ray_plane_intersection(ray_origin, ray_direction, plane_normal, point_on_plane):
-        """Frome chatgpt"""
+        """
+        Notes:
+            Explanation available here: https://math.stackexchange.com/questions/2934157/how-to-calculate-the-intersection-point-between-a-straight-and-a-triangle-in-py
+
+            1. We determine intersection of ray with plane
+            2. We determine whether intersection point is inside triangle
+        """
+
         # Check if the ray is parallel to the plane
-        denom = np.dot(plane_normal, ray_direction)
+        denom = np.dot(ray_direction, plane_normal)
+
+        # Very unlikely...
         if np.abs(denom) < 1e-11:
             return None  # No intersection, the ray is parallel to the plane
-        
-        # Calculate the intersection point
-        t = np.dot(plane_normal, point_on_plane - ray_origin) / denom
+
+        # t = -(o-p).n / d.n
+        t = - np.dot(ray_origin - point_on_plane, plane_normal) / denom
+
+        # If t is behind the origin
         if t < 0:
             return None  # The intersection is behind the ray origin
-        
+
         intersection_point = ray_origin + t * ray_direction
+
         return intersection_point
     
 
@@ -247,7 +222,6 @@ def getHullIntersection(camdata):
 
             if j == 0:
                 # line = Line3D(top.tolist(), direction_ratio=direct.tolist())
-
                 rays.append([top.numpy(), direct.numpy()]) 
 
             else:
@@ -258,39 +232,41 @@ def getHullIntersection(camdata):
                 normal = np.cross(edge1, edge2)
                 normal = normal / np.linalg.norm(normal)
 
-                planes.append([normal, v0])
+                plane_data = {
+                    'normal': normal,
+                    'point': v1,  # if we split the polygon into triangles, this is a common point shared by triangles
+                    'vertices': [top, bottom, data[0][(i + 1) % 4], data[1][(i + 1) % 4]],
+                    'triangles': [
+                        [top, bottom, data[0][(i + 1) % 4]],
+                        [bottom, data[0][(i + 1) % 4], data[1][(i + 1) % 4]]
+                    ]
+
+                }
+                planes.append(plane_data)
+
+                # planes.append([normal, v1])
 
 
-                poly3d = [[top.tolist(),  data[1][(i+1)%4].tolist(), bottom.tolist()]]
+                poly3d = [[top.tolist(), data[1][(i+1)%4].tolist(), bottom.tolist()]]
                 poly = Poly3DCollection(poly3d, alpha=0.5, facecolors='cyan', linewidths=1, edgecolors='r')
-
-                # # Add the polygon to the plot
                 ax.add_collection3d(poly)
-
-                # plane = Plane(top.tolist(),  data[1][(i+1)%4].tolist(), bottom.tolist())
-                # planes.append(plane)
 
 
     intersections = []
     for ray in rays:
         for plane in planes:
 
-            inter = ray_plane_intersection(ray[0], ray[1], plane[0], plane[1])
+            normal = plane['normal']
+            plane_point = plane['point']
 
+
+            inter = ray_plane_intersection(ray[0], ray[1], normal, plane_point)
+
+            # If inter is None then the ray is either parallel or intersection occurs behind the camera
             if inter is not None:
+                # Now we need to determine if the point lies inside our polygon
+
                 intersections.append(inter)
-    #         intr = plane.intersection(ray)
-    #         inside = True #is_point_on_line_segment(ray, intr[0])
-            
-    #         if inside:
-    #             intersection =np.array(intr[0],dtype=float)
-
-
-    #             intersections.append(intersection)
-    # print(len(intersections))
-    # print(intersections)
-
-    
 
 
     ax.scatter(*zip(*intersections), 'r')
