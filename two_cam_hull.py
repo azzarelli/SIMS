@@ -151,21 +151,6 @@ def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
 
     return hulls
 
-from sympy import Plane, Line3D, Point3D
-
-def ray_plane_intersection(ray_origin, ray_direction, plane_normal, point_on_plane):
-    # Check if the ray is parallel to the plane
-    denom = np.dot(plane_normal, ray_direction)
-    if np.abs(denom) < 1e-6:
-        return None  # No intersection, the ray is parallel to the plane
-    
-    # Calculate the intersection point
-    t = np.dot(plane_normal, point_on_plane - ray_origin) / denom
-    if t <= 0.001:
-        return None  # The intersection is behind the ray origin
-    
-    intersection_point = ray_origin + t * ray_direction
-    return intersection_point
 
 def getHullIntersection(camdata):
     """
@@ -208,6 +193,21 @@ def getHullIntersection(camdata):
 
         return intersection_point
     
+    def inside_triangle(tri_verts, intersection, normal):
+
+        err= -0.001
+        one = np.cross((tri_verts[1] - tri_verts[0]), (intersection - tri_verts[0]))
+        two = np.cross((tri_verts[2] - tri_verts[1]), (intersection - tri_verts[1]))
+        three = np.cross((tri_verts[0] - tri_verts[2]), (intersection - tri_verts[2]))
+
+        e1 = np.dot(one, normal)/360.
+        e2 = np.dot(two, normal)/360.
+        e3 = np.dot(three, normal)/360.
+        print(e1, e2, e3)
+        if e1 >= err and e2 >= err and e3 >= err:
+            return 1
+        return 0
+
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
@@ -234,26 +234,25 @@ def getHullIntersection(camdata):
 
                 plane_data = {
                     'normal': normal,
-                    'point': v1,  # if we split the polygon into triangles, this is a common point shared by triangles
-                    'vertices': [top, bottom, data[0][(i + 1) % 4], data[1][(i + 1) % 4]],
+                    'point': v1.numpy(),  # if we split the polygon into triangles, this is a common point shared by triangles
+                    'vertices': [top.numpy(), bottom.numpy(), data[0][(i + 1) % 4].numpy(), data[1][(i + 1) % 4].numpy()],
                     'triangles': [
-                        [top, bottom, data[0][(i + 1) % 4]],
-                        [bottom, data[0][(i + 1) % 4], data[1][(i + 1) % 4]]
+                        [top.numpy(), bottom.numpy(), data[0][(i + 1) % 4].numpy()],
+                        [bottom.numpy(), data[0][(i + 1) % 4].numpy(), data[1][(i + 1) % 4].numpy()]
                     ]
 
                 }
                 planes.append(plane_data)
 
-                # planes.append([normal, v1])
-
-
                 poly3d = [[top.tolist(), data[1][(i+1)%4].tolist(), bottom.tolist()]]
-                poly = Poly3DCollection(poly3d, alpha=0.5, facecolors='cyan', linewidths=1, edgecolors='r')
+                poly = Poly3DCollection(poly3d, alpha=0.1, facecolors='cyan', linewidths=1, edgecolors='r')
                 ax.add_collection3d(poly)
 
 
     intersections = []
     for ray in rays:
+        ray_inters = 0
+
         for plane in planes:
 
             normal = plane['normal']
@@ -262,14 +261,26 @@ def getHullIntersection(camdata):
 
             inter = ray_plane_intersection(ray[0], ray[1], normal, plane_point)
 
+
+
             # If inter is None then the ray is either parallel or intersection occurs behind the camera
             if inter is not None:
                 # Now we need to determine if the point lies inside our polygon
+                triangles = plane['triangles']
 
-                intersections.append(inter)
+                inside = 0
+                for tri_verts in triangles:
+                    inside += inside_triangle(tri_verts, inter, normal)
+
+                if inside == 1:
+                    intersections.append(inter)
+                    ray_inters += 1
+
+        print(ray_inters)
 
 
-    ax.scatter(*zip(*intersections), 'r')
+
+    ax.scatter(*zip(*intersections), c='r')
     plt.show()
 
     # Then lets 
