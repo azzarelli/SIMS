@@ -1,7 +1,6 @@
 import os
 import json
 import numpy as np
-import math
 import torch
 
 
@@ -11,36 +10,21 @@ from nerfstudio.utils import plotly_utils as vis
 import matplotlib
 matplotlib.use('TkAgg')
 
-
-def focal2fov(focal, pixels): # From 4DGS
-    return 2*math.atan(pixels/(2*focal))
-
 def getTrapezoidVertices(fp, ext, znear:float=0.1, zfar:float=20.):
     # Ensure path exists
     assert os.path.exists(fp+'transforms_train.json'), 'Could not find the transorms_train.json file'
     
-    mask_fp = fp+'mask/'
-
 
     with open(fp+'transforms_train.json', 'r') as file:
         data = json.load(file)
 
     image_names = [dir for dir in os.listdir(fp) if ext in dir]
 
+    mask_fp = fp+'mask/'
     mask_fps = [mask_fp+dir for dir in image_names]
-
-    # image_fps = [fp+dir for dir in image_names]
 
     frame_data = data['frames']
 
-    # selected_data = {
-    #     'h':data['h'],
-    #     'w':data['w'],
-    #
-    #     'fovx': focal2fov(data['fl_x'], data['w']),
-    #     'fovy': focal2fov(data['fl_y'], data['h'])
-    # }
-    
     """
     The idea is to get the mask bounding box and projecting the two hulls comprised from each mask bounding box
     """
@@ -195,7 +179,7 @@ def getHullIntersection(camdata):
     
     def inside_triangle(tri_verts, intersection, normal):
 
-        err= -0.001
+        err = -0.001
         one = np.cross((tri_verts[1] - tri_verts[0]), (intersection - tri_verts[0]))
         two = np.cross((tri_verts[2] - tri_verts[1]), (intersection - tri_verts[1]))
         three = np.cross((tri_verts[0] - tri_verts[2]), (intersection - tri_verts[2]))
@@ -203,10 +187,42 @@ def getHullIntersection(camdata):
         e1 = np.dot(one, normal)/360.
         e2 = np.dot(two, normal)/360.
         e3 = np.dot(three, normal)/360.
-        print(e1, e2, e3)
         if e1 >= err and e2 >= err and e3 >= err:
             return 1
         return 0
+
+    def draw_aabb(ax, aabb_min, aabb_max):
+        # Create the vertices of the AABB
+        vertices = [
+            [aabb_min[0], aabb_min[1], aabb_min[2]],
+            [aabb_max[0], aabb_min[1], aabb_min[2]],
+            [aabb_max[0], aabb_max[1], aabb_min[2]],
+            [aabb_min[0], aabb_max[1], aabb_min[2]],
+            [aabb_min[0], aabb_min[1], aabb_max[2]],
+            [aabb_max[0], aabb_min[1], aabb_max[2]],
+            [aabb_max[0], aabb_max[1], aabb_max[2]],
+            [aabb_min[0], aabb_max[1], aabb_max[2]]
+        ]
+
+        # Define the 12 edges of the AABB
+        edges = [
+            [vertices[0], vertices[1]],
+            [vertices[1], vertices[2]],
+            [vertices[2], vertices[3]],
+            [vertices[3], vertices[0]],
+            [vertices[4], vertices[5]],
+            [vertices[5], vertices[6]],
+            [vertices[6], vertices[7]],
+            [vertices[7], vertices[4]],
+            [vertices[0], vertices[4]],
+            [vertices[1], vertices[5]],
+            [vertices[2], vertices[6]],
+            [vertices[3], vertices[7]]
+        ]
+
+        # Plot the edges
+        for edge in edges:
+            ax.plot3D(*zip(*edge), color="r")
 
 
     fig = plt.figure()
@@ -276,12 +292,21 @@ def getHullIntersection(camdata):
                     intersections.append(inter)
                     ray_inters += 1
 
-        print(ray_inters)
-
-
-
+    # Add the intersections to the plot
     ax.scatter(*zip(*intersections), c='r')
+
+
+    intersections = np.array(intersections)
+    min_coords = np.min(intersections, axis=0)
+    max_coords = np.max(intersections, axis=0)
+
+    draw_aabb(ax, min_coords, max_coords)
+
+
     plt.show()
+
+    return min_coords, max_coords
+
 
     # Then lets 
 from argparse import ArgumentParser
@@ -307,7 +332,6 @@ if __name__ == "__main__":
     mask_colors = ['B'] # TODO define a way of selecting a specific colour channel for an image with multiple detected humans
 
     # Projection Parameters
-    # TODO : Maybe makle these arguments?
 
     zfar = 100.0
     znear = 0.01
@@ -315,4 +339,15 @@ if __name__ == "__main__":
     DEBUG = args.debug
     hulls = getTrapezoidVertices(args.fp, args.ext)
 
-    getHullIntersection(hulls)
+    mincoords, maxcoords = getHullIntersection(hulls)
+
+    with open(args.fp+'transforms_train.json', 'r') as file:
+        data = json.load(file)
+
+    data['AABB'] = [tuple(mincoords), tuple(maxcoords)]
+
+    with open(args.fp+'transforms_train.json', 'w') as file:
+        json.dump(data, file)
+
+
+
